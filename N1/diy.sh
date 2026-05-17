@@ -27,6 +27,14 @@
 #   3. 功能性：补充OpenWrt官方源缺失的功能
 # ==================================================================================
 
+# ==================================================================================
+# 【第三方插件开关】如需禁用某个插件，请注释对应的git clone和配置行
+# 禁用方法：
+#   1. 将git clone行注释（行首加#）
+#   2. 将echo追加配置行注释（行首加#）
+#   3. 编译时不会下载和安装该插件
+# ==================================================================================
+
 # 【Amlogic N1盒子管理插件】- 斐讯N1专用硬件管理工具
 # 项目地址：https://github.com/ophub/luci-app-amlogic
 # 功能说明：N1盒子的专用管理界面，支持：
@@ -36,7 +44,8 @@
 #   - 引导分区管理
 #   - USB启动/EMMC启动切换
 # 克隆策略：--depth=1浅克隆，只获取最新版本，减少传输量
-git clone --depth=1 https://github.com/ophub/luci-app-amlogic package/amlogic
+# 【状态】：如需禁用，请注释下面两行
+# git clone --depth=1 https://github.com/ophub/luci-app-amlogic package/amlogic
 
 # 【Linkease NAS管理插件】- 网络存储管理界面
 # 项目地址：https://github.com/linkease/luci-app-linkease
@@ -46,7 +55,8 @@ git clone --depth=1 https://github.com/ophub/luci-app-amlogic package/amlogic
 #   - DDNS配置（与云添加合作）
 #   - 存储设备监控
 # 克隆说明：未使用--depth参数，保留完整历史便于后续更新
-git clone  https://github.com/linkease/luci-app-linkease package/linkease
+# 【状态】：如需禁用，请注释下面两行
+# git clone  https://github.com/linkease/luci-app-linkease package/linkease
 
 # 【Lucky插件】- 网络工具集成
 # 项目地址：https://github.com/gdy666/luci-app-lucky
@@ -56,7 +66,23 @@ git clone  https://github.com/linkease/luci-app-linkease package/linkease
 #   - 动态域名（DDNS）
 #   - 网络诊断工具
 # 特性说明：Lucky是一个较新的项目，社区活跃度高
-git clone  https://github.com/gdy666/luci-app-lucky.git package/lucky
+# 【状态】：如需禁用，请注释下面两行
+# git clone  https://github.com/gdy666/luci-app-lucky.git package/lucky
+
+# ==================================================================================
+# 【UU游戏加速器】- 网络游戏加速功能
+# 项目地址：https://github.com/kenjiokabe/luci-app-uuplugin (示例)
+# 备选项目：https://github.com/SuLingGG/luci-app-uugamebooster
+# 功能说明：网易UU路由器插件，实现游戏加速
+#   - 支持PC/手机/主机全平台游戏加速
+#   - 智能选路减少延迟和丢包
+#   - 兼容OpenClash共存
+# 注意事项：
+#   1. 需要UU账号（免费/付费版均可）
+#   2. 需要在插件中登录UU账号获取加速授权
+#   3. 加速原理：创建加密隧道到UU加速服务器
+# 【状态】：如需启用，取消下面注释即可
+# git clone --depth=1 https://github.com/SuLingGG/luci-app-uugamebooster package/luci-app-uugamebooster
 
 # ==================================================================================
 # 【功能区3】OpenClash核心预置 - 预留的Clash核心下载功能
@@ -82,12 +108,15 @@ git clone  https://github.com/gdy666/luci-app-lucky.git package/lucky
 #   - luci-app-amlogic: N1硬件管理插件（来自上面的git clone）
 #   - luci-app-linkease: NAS管理插件（来自上面的git clone）
 #   - luci-app-lucky: 网络工具插件（来自上面的git clone）
+#   - luci-app-uugamebooster: UU游戏加速器（来自上面的git clone）
 # 追加方式：echo重定向追加，>>表示追加而不是覆盖
+# 【重要】：请与上方git clone保持同步，注释掉git clone时也要注释对应配置
 echo "
-# 插件
-CONFIG_PACKAGE_luci-app-amlogic=y
-CONFIG_PACKAGE_luci-app-linkease=y
-CONFIG_PACKAGE_luci-app-lucky=y
+# 插件 (请与上方git clone保持同步)
+# CONFIG_PACKAGE_luci-app-amlogic=y
+# CONFIG_PACKAGE_luci-app-linkease=y
+# CONFIG_PACKAGE_luci-app-lucky=y
+# CONFIG_PACKAGE_luci-app-uugamebooster=y
 " >> .config
 
 
