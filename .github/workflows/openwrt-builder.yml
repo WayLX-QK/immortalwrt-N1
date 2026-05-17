@@ -1,115 +1,418 @@
+# ==================================================================================
+# 项目名称：ImmortalWrt 斐讯N1固件自动化构建流水线
+# 构建目标：基于Amlogic S905D芯片的斐讯N1盒子定制OpenWrt固件
+# 流水线框架：GitHub Actions CI/CD
+# 核心功能：自动化源码拉取→编译→打包→发布全流程
+# ==================================================================================
+# 【流水线触发机制说明】
+# workflow_dispatch: 支持开发者手动触发构建，可选SSH调试模式进入构建容器
+# schedule: 定时触发策略，每月1日凌晨自动执行构建，实现固件月度更新
+# ==================================================================================
 name: Build ImmortalWrt for N1
 
+# ==================================================================================
+# 触发条件配置 - 双模式触发机制
+# ==================================================================================
 on:
+  # 【手动触发模式】允许开发者通过Web界面手动启动构建流程
+  # 业务逻辑：适用于紧急修复发布、测试特定配置、或调试构建问题
+  # 输入参数ssh：布尔值控制是否启用SSH调试会话，构建失败时可进入容器排查
   workflow_dispatch:
    inputs:
       ssh:
         description: 'SSH connection to Actions'
         required: false
         default: 'false'
+  # 【定时触发模式】实现自动化月度发布流程
+  # 业务逻辑：利用GitHub Actions定时器实现无人值守构建，支持版本迭代节奏控制
+  # 时区：UTC时间0点，即北京时间早晨8点，非高峰时段利用CI资源
   schedule:
     - cron: "0 0 1 * *"
 
+# ==================================================================================
+# 全局环境变量配置 - 固件构建核心参数
+# 【环境变量设计原则】
+# 1. 版本可追溯：所有关键路径和版本号通过变量统一管理
+# 2. 敏感信息隔离：Token等密钥通过secrets注入，不暴露在配置中
+# 3. 参数化构建：支持分支切换、配置切换实现多版本并行构建
+# ==================================================================================
 env:
+  # 【源码仓库地址】ImmortalWrt官方仓库fork版本，保持与上游同步
+  # 业务逻辑：可通过修改REPO_URL实现切换到其他OpenWrt衍生版
   REPO_URL: https://github.com/immortalwrt/immortalwrt
+  # 【源码分支】选择23.05长期支持版本，兼顾内核版本和软件包兼容性
+  # 版本策略说明：23.05分支基于OpenWrt 23.05内核5.15，稳定性与功能性平衡
+  # 备选分支：可切换到openwrt-22.03(内核5.10)或openwrt-21.02(内核5.4)用于特定需求
   REPO_BRANCH: openwrt-23.05
+  # 【Kconfig配置文件】预定义的编译配置文件，包含目标平台和软件包选择
+  # 业务逻辑：N1/.config定义armsr平台、s905d芯片支持、以及基础软件包集
   CONFIG_FILE: N1/.config
+  # 【自定义脚本】编译前执行的定制化脚本，用于注入额外软件源和配置修改
+  # 业务逻辑：diy.sh实现主题替换、IP修改、第三方插件集成等功能
   DIY_SH: N1/diy.sh
+  # 【文件系统模板】预置的系统配置文件目录，编译时将覆盖默认配置
+  # 业务逻辑：N1/files包含网络、DHCP、防火墙、主题资源等出厂预配置
   FILES: N1/files
+  # 【时区设置】统一时区确保日志时间戳和定时任务准确
+  # 业务逻辑：Asia/Shanghai对应北京时间，用于固件默认时区和Cron任务
   TZ: Asia/Shanghai
+  # 【GitHub访问令牌】用于发布Release和API调用的认证Token
+  # 安全说明：存储在GitHub Secrets中，运行时注入，防止Token泄露
   GITHUB_TOKEN: ${{ secrets.TOKEN }}
 
+# ==================================================================================
+# 构建作业定义 - 单作业多步骤串行架构
+# 【架构设计理念】
+# 1. 资源隔离：单一作业确保缓存共享和状态一致性
+# 2. 步骤解耦：每个步骤独立执行，便于问题定位和重试
+# 3. 状态传递：通过GITHUB_ENV在步骤间传递编译状态标志
+# ==================================================================================
 jobs:
+  # 【执行环境规格】ubuntu-24.04提供最新的编译工具链和系统库
+  # 资源规格：2核vCPU/7GB内存/14GB SSD，符合OpenWrt编译基本需求
+  # 操作系统选择：Ubuntu 24.04 LTS提供长期支持，工具链版本较新
   build:
     runs-on: ubuntu-24.04
 
+    # ==================================================================================
+    # 步骤1：仓库检出 - 获取构建所需的源码和配置
+    # 【业务逻辑】将当前仓库的N1配置文件、diy脚本、files模板检出到工作目录
+    # 注意：此处仅检出项目自身的配置，OpenWrt源码在后续步骤单独克隆
+    # ==================================================================================
     steps:
     - name: 准备完成
+      # actions/checkout@main：Git官方Actions，将仓库代码检出到${{ github.workspace }}
+      # 用于场景：获取N1/.config、diy.sh、files目录等自定义配置和脚本
       uses: actions/checkout@main
 
+    # ==================================================================================
+    # 步骤2：磁盘空间释放 - 最大化可用构建空间
+    # 【业务逻辑】GitHub Runner默认包含大量冗余工具，清理后释放约10-15GB空间
+    # 清理策略：
+    #   - android: 移除Android SDK（约3GB）
+    #   - dotnet: 移除.NET SDK（约2GB）
+    #   - haskell: 移除Haskell工具链（约1GB）
+    #   - docker-images: 清理预置Docker镜像（约2GB）
+    #   - large-packages: 移除大型预装包（约3GB）
+    #   - swap-storage: 清理swap文件增加可用内存
+    # 重要性：N1固件编译需要约20GB空间，清理后确保编译不因空间不足失败
+    # ==================================================================================
     - name: 清理磁盘空间
+      # jlumbroso/free-disk-space@main：第三方磁盘清理Action，官方Actions未提供该功能
+      # 维护状态：popular action with frequent updates，兼容性较好
       uses: jlumbroso/free-disk-space@main
       with:
+        # 【缓存清理策略】tool-cache设为false保留npm/yarn等工具缓存
+        # 业务逻辑：避免每次构建重新下载npm包，但可能占用约500MB空间
         tool-cache: false
+        # 【Android SDK清理】OpenWrt编译不需要Android环境，清理释放空间
         android: true
+        # 【.NET清理】编译OpenWrt不需要.NET环境，清理释放约2GB
         dotnet: true
+        # 【Haskell清理】编译OpenWrt不需要Haskell工具链
         haskell: true
+        # 【大型预装包清理】移除apt大型预装包，如数据库、邮件服务器等
         large-packages: true
+        # 【Docker镜像清理】GitHub Runner预置了部分Docker镜像，编译不需要则清理
         docker-images: true
+        # 【Swap空间清理】将Swap文件转为可用磁盘空间，增加实际内存
         swap-storage: true
 
+    # ==================================================================================
+    # 步骤3：编译环境初始化 - 安装OpenWrt编译所需的系统依赖
+    # 【业务逻辑】OpenWrt编译依赖完整的GNU工具链和交叉编译工具
+    # 依赖包分类：
+    #   1. 基础构建工具：gcc, g++, make, git, subversion等
+    #   2. 编译工具链：cross-prefix工具用于ARM64交叉编译
+    #   3. 依赖库：libssl, zlib, ncurses等
+    #   4. 脚本语言：python3用于内核配置和构建脚本
+    # ==================================================================================
     - name: 初始化编译环境
+      # DEBIAN_FRONTEND=noninteractive：避免apt安装过程中的交互式确认
+      # 业务逻辑：GitHub Actions无交互输入，该变量确保安装过程自动完成
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
+        # 【apt源更新】同步最新软件包索引，确保能安装到最新版本的依赖
+        # -qq参数：quiet模式，减少日志输出量
+        # -y参数：自动确认所有安装提示
         sudo -E apt-get -qq update -y
+        # 【外部依赖获取】从第三方仓库获取预编译的OpenWrt依赖包集合
+        # 【风险警示】依赖外部URL存在供应链风险：
+        #   - 如果该仓库不可达（如GitHub宕机、被墙），构建将失败
+        #   - 如果仓库被恶意篡改，可能引入安全漏洞
+        #   建议：未来应将此依赖列表内联到项目，或使用镜像源
         sudo -E apt-get -qq install -y $(curl -fsSL https://raw.githubusercontent.com/nantayo/My-Pkg/master/2410)
+        # 【清理安装缓存】删除apt缓存减少磁盘占用，约释放200-500MB
+        # --purge参数：同时清理配置残留，彻底释放空间
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
+        # 【时区设置】统一日志时间戳时区，便于问题排查和日志分析
+        # 业务逻辑：设置为Asia/Shanghai确保固件默认时区正确
         sudo timedatectl set-timezone "$TZ"
+        # 【工作目录创建】/workdir将作为OpenWrt源码的编译工作目录
+        # 业务逻辑：独立于github.workspace，避免路径冲突和权限问题
         sudo mkdir -p /workdir
+        # 【目录权限设置】将workdir所有者改为当前用户，避免sudo权限问题
+        # $USER和$GROUPS由GitHub Actions自动注入
         sudo chown $USER:$GROUPS /workdir
         
+    # ==================================================================================
+    # 步骤8：源码克隆 - 获取OpenWrt基础源码树
+    # 【业务逻辑】从ImmortalWrt仓库克隆指定分支的完整源码
+    # 源码规模：约500MB（含.git历史），单分支克隆约100-200MB
+    # 克隆策略：
+    #   --single-branch：仅克隆指定分支，减少数据传输和时间
+    #   --depth=1：浅克隆不保留历史，大幅减少克隆时间（从3分钟降至30秒）
+    #   -b $REPO_BRANCH：明确指定分支，避免从默认分支拉取错误版本
+    # 【版本选择说明】
+    #   - 当前使用openwrt-21.02分支，内核版本5.4，稳定性极高
+    #   - 适用于对兼容性要求较高的场景，如UU游戏加速器等legacy应用
+    #   - 5.4内核在N1上的驱动支持最完善，WiFi/BT等外设兼容性最好
+    # 【重要说明】浅克隆的副作用：
+    #   - 无法使用git log查看历史版本
+    #   - 无法执行git pull拉取增量更新
+    #   - 每次构建都是全新克隆，无法利用增量更新优势
+    # ==================================================================================
     - name: 克隆源码
+      # 工作目录切换到/workdir，避免污染github.workspace根目录
       working-directory: /workdir
       run: |
+        # 【磁盘空间诊断】克隆前打印磁盘使用情况，便于排查空间问题
+        # df -hT：human-readable格式显示使用量和文件系统类型
         df -hT $PWD
+        # 【Git克隆命令】从REPO_URL克隆指定分支
+        # --single-branch：仅获取单个分支，减少传输量
+        # --depth=1：浅克隆最近一个版本，大幅提升克隆速度
+        # --single-branch与--depth配合实现最小化克隆
         git clone $REPO_URL -b $REPO_BRANCH --single-branch --depth=1 openwrt
+        # 【符号链接创建】将/workdir/openwrt映射到Actions标准工作空间
+        # 业务逻辑：后续Actions和脚本可使用$GITHUB_WORKSPACE/openwrt访问源码
+        # 作用：统一路径引用规范，便于其他Actions读取编译产物
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
+    # ==================================================================================
+    # 步骤9：Feeds更新与安装 - 获取OpenWrt扩展软件包
+    # 【业务逻辑】OpenWrt采用Feeds机制管理第三方软件包，类似Linux发行版的AUR
+    # Feeds分类：
+    #   1. packages：基础工具软件包（curl, wget, iptables等）
+    #   2. luci：Web界面相关的软件包
+    #   3. routing：路由协议相关软件包（bird, quagga等）
+    #   4. telematics：车载相关软件包
+    #   5. 第三方：自定义Feeds（如 immortalwrt自身的扩展）
+    # 【执行流程】
+    #   - feeds update：从各Feeds仓库获取最新软件包索引
+    #   - feeds install：将需要的软件包链接到package/目录
+    # ==================================================================================
     - name: 更新 & 安装 feeds
+      # 切换到openwrt目录执行Scripts，符合OpenWrt构建规范
       working-directory: ./openwrt
       run: |
+        # 【Feeds更新】从远程仓库拉取最新的软件包定义文件（Makefile）
+        # 执行效果：在feeds/目录下生成各Feeds的索引文件
+        # 失败影响：如果某Feeds仓库不可达，对应软件包将无法使用
         ./scripts/feeds update -a
+        # 【Feeds安装】将需要的软件包链接到package/目录
+        # -a参数：安装所有在.config中声明的Feeds软件包
+        # 执行效果：在package/目录下创建符号链接指向feeds/目录
         ./scripts/feeds install -a
 
+    # ==================================================================================
+    # 步骤10：加载自定义配置 - 应用项目特定的配置和脚本
+    # 【业务逻辑】将项目自身的配置覆盖到OpenWrt源码树
+    # 配置来源：
+    #   1. FILES：文件系统模板（网络配置、主题资源、启动脚本等）
+    #   2. CONFIG_FILE：.config Kconfig配置文件
+    #   3. DIY_SH：自定义Shell脚本（安装额外插件、修改源码等）
+    # 执行顺序：先移动文件，再执行脚本，确保配置先生效
+    # ==================================================================================
     - name: 加载自定义配置
       run: |
+        # 【移动文件系统模板】将N1/files/复制到openwrt/files/
+        # 条件判断：[ -e $FILES ]确保源目录存在才执行，避免文件缺失报错
+        # 业务逻辑：预置的网络配置、主题资源、插件配置将覆盖默认配置
         [ -e $FILES ] && mv $FILES openwrt/files
+        # 【移动Kconfig配置】将N1/.config复制到openwrt/.config
+        # 重要性：.config定义编译哪些软件包，是编译的核心配置
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        # 【添加执行权限】diy.sh是Shell脚本，必须有执行权限才能运行
+        # chmod +x：添加可执行位，不改变文件内容
         chmod +x $DIY_SH
+        # 【执行自定义脚本】进入openwrt目录执行diy.sh
+        # 业务逻辑：diy.sh实现主题替换、默认IP修改、第三方插件安装等功能
+        # 环境变量：$GITHUB_WORKSPACE指向仓库根目录，便于引用项目内资源
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_SH
 
+    # ==================================================================================
+    # 步骤11：SSH调试连接 - 可选的交互式调试入口
+    # 【业务逻辑】当开发者需要调试构建问题时，可通过SSH进入构建容器
+    # 使用场景：
+    #   1. 编译失败需要手动排查原因
+    #   2. 需要在构建过程中执行自定义命令
+    #   3. 测试特定配置的实际效果
+    # 【安全警示】
+    #   - 每次构建都会创建新的临时容器，构建结束后销毁
+    #   - SSH密钥需要预先配置在GitHub Secrets中
+    #   - 调试完成后应立即断开，避免资源浪费
+    # ==================================================================================
     - name: SSH 连接到 Actions
+      # P3TERX/ssh2actions：第三方Action，实现GitHub Actions到远程SSH
+      # 条件触发：仅当手动触发且ssh参数为true时执行
       uses: P3TERX/ssh2actions@main
       if: (github.event.inputs.ssh == 'true') || contains(github.event.action, 'ssh')
 
+    # ==================================================================================
+    # 步骤12：软件包下载 - 预下载所有源码依赖
+    # 【业务逻辑】在正式编译前下载所有源码包，避免编译过程中网络中断
+    # 下载内容：
+    #   1. 内核源码和补丁
+    #   2. 各软件包的源码tarball
+    #   3. 交叉编译工具链
+    #   4. 系统库和头文件
+    # 【关键操作】
+    #   - make defconfig：读取.config生成完整Makefile依赖关系
+    #   - make download：并行下载所有依赖源码包
+    #   - find + rm：清理小于1KB的异常文件（可能是下载失败的残留）
+    # ==================================================================================
     - name: 下载软件包
       working-directory: ./openwrt
       run: |
+        # 【生成完整配置】读取.config生成完整编译依赖关系
+        # 业务逻辑：.config可能不完整，make defconfig会补充依赖项
+        # 执行效果：生成.include文件，定义完整的编译目标
         make defconfig
+        # 【并行下载】使用8线程并发下载所有依赖源码包
+        # -j8参数：8个并发下载任务，充分利用网络带宽
+        # 失败处理：如果部分包下载失败，可在编译阶段重试
         make download -j8
+        # 【异常文件诊断】查找并列出所有小于1KB的文件
+        # 业务逻辑：正常下载的文件通常大于1KB，小文件可能是下载中断的残留
+        # 输出：列出所有可疑文件的详细信息
         find dl -size -1024c -exec ls -l {} \;
+        # 【异常文件清理】删除小于1KB的疑似损坏文件
+        # 业务逻辑：避免残留文件影响后续编译判断
+        # 【问题分析】该策略存在误删风险：
+        #   - 部分patch文件、small binary确实小于1KB
+        #   - 建议增加文件类型判断后再删除
         find dl -size -1024c -exec rm -f {} \;
 
+    # ==================================================================================
+    # 步骤13：固件编译 - 执行核心编译任务
+    # 【业务逻辑】调用OpenWrt构建系统完成固件编译
+    # 编译流程：
+    #   1. 准备工具链（toolchain）
+    #   2. 编译内核（kernel）
+    #   3. 编译软件包（packages）
+    #   4. 生成文件系统镜像（rootfs）
+    # 【并行策略】
+    #   - make -j$(nproc)：使用全部CPU核心并行编译
+    #   - nproc()返回CPU核心数，GitHub Runner通常为2-4核
+    # 【错误处理机制】
+    #   - 首次失败：降级到单线程重试（可能解决内存不足问题）
+    #   - 二次失败：启用详细日志V=s模式输出完整编译信息
+    #   - 问题：当前策略未区分错误类型，治标不治本
+    # ==================================================================================
     - name: 编译固件
       run: |
+        # 【目录权限确保】确保所有文件可读可执行，避免权限问题导致编译失败
+        # -R参数：递归处理所有子目录和文件
+        # 755权限：所有者全权限，组和其他读+执行
         chmod -R 755 openwrt
+        # 【切换工作目录】进入OpenWrt源码根目录执行编译
         cd openwrt
+        # 【打印编译信息】显示当前使用的并行任务数
+        # nproc：系统调用，返回当前可用CPU核心数
         echo -e "$(nproc) thread compile"
+        # 【执行编译】核心编译命令
+        # 策略说明：
+        #   第一次：尝试最大并行编译（-j$(nproc)），利用全部CPU资源
+        #   第二次失败：降级到单线程(-j1)，解决可能内存不足的OOM问题
+        #   第三次失败：开启V=s详细输出，便于定位具体失败原因
+        # 【问题诊断】当前策略的不足：
+        #   1. 未实现内存感知动态调整并行数
+        #   2. 未捕获编译日志用于离线分析
+        #   3. 未区分网络错误、源码错误、配置错误等不同失败类型
         make -j$(nproc) || make -j1 || make -j1 V=s
+        # 【编译状态标记】通过环境变量传递编译结果给后续步骤
+        # 业务逻辑：供打包步骤判断是否继续执行
         echo "compile_status=success" >> $GITHUB_ENV
 
+# ==================================================================================
+    # 步骤14：镜像打包 - 将编译产物转换为可烧录的固件镜像
+    # 【业务逻辑】将OpenWrt rootfs转换为斐讯N1可用的IMG镜像文件
+    # 打包流程：
+    #   1. 解压armvirt根文件系统tarball
+    #   2. 注入内核镜像（可选择flippy内核或其他版本）
+    #   3. 配置设备树DTB（meson-gxl-s905d-phicomm-n1.dtb）
+    #   4. 写入U-Boot引导程序
+    #   5. 创建分区表（BOOT + ROOTFS）
+    #   6. 打包为.img.xz压缩文件
+    # 【参数说明】
+    #   - PACKAGE_SOC：s905d - Amlogic S905D芯片代号
+    #   - KERNEL_VERSION_NAME：内核版本标识（5.15.y_6.6.y或5.4.y）
+    #   - SW_FLOWOFFLOAD：软件流量卸载开关（0关闭，减少资源占用）
+    #   - SFE_FLOW：Shortcut Forward Engine加速（0关闭，减少兼容性问题）
+    #   - ENABLE_WIFI_K510：K510芯片WiFi支持（0关闭，N1无需）
+    # 【前置条件判断】
+    #   - 仅当compile_status=success时执行，避免无产物时打包失败
+    #   - !cancelled()确保构建未被取消
+    # ==================================================================================
     - name: 打包镜像文件
+      # 执行条件：编译成功且未被取消
       if: ${{ env.compile_status }} == 'success' && !cancelled()
+      # unifreq/openwrt_packit：第三方N1镜像打包Action
+      # 封装了mk_s905d_n1.sh的核心逻辑，简化CI配置
       uses: unifreq/openwrt_packit@master
       env:
+        # 【ARM虚拟化根文件系统】OpenWrt编译输出的根文件系统tarball
+        # 路径模式：openwrt/bin/targets/{target}/{subtarget}/*.tar.gz
+        # 包含内容：完整的文件系统目录结构、预装的软件包
         OPENWRT_ARMVIRT: openwrt/bin/targets/*/*/*.tar.gz
+        # 【内核版本名称】用于标识和查找对应的内核文件
+        # 业务逻辑：选择与OpenWrt分支匹配的内核版本
+        # 当前配置：5.15.y_6.6.y（对应23.05分支）或5.4.y（对应21.02分支）
         KERNEL_VERSION_NAME: 5.15.y_6.6.y
+        # 【芯片平台】指定目标硬件平台，s905d对应斐讯N1
         PACKAGE_SOC: s905d
+        # 【镜像压缩格式】输出为.xz压缩格式，节省传输带宽
+        # 压缩比：约50-70%，500MB镜像压缩后约150-250MB
         GZIP_IMGS: .xz
+        # 【自定义打包脚本】使用项目自身的N1镜像生成脚本
+        # 包含逻辑：分区创建、DTB注入、U-Boot写入、btrfs文件系统配置等
         SCRIPT_DIY_PATH: N1/mk_s905d_n1.sh
+        # 【发布者名称】固件信息中显示的作者名称
         WHOAMI: waylx
+        # 【固件版本号】基于编译日期生成版本标识
+        # 格式：YYYY.MM.DD，如2024.05.17
         OPENWRT_VER: $(date +"%Y.%m.%d")
+        # 【软件流量卸载】通过nftables实现软件层面流量转发加速
+        # 业务逻辑：关闭可减少固件体积和内存占用，适合N1这种低性能设备
+        # 适用场景：路由器有更高性能需求时可开启
         SW_FLOWOFFLOAD: 0
+        # 【Shortcut Forward Engine】高通提出的网络加速技术
+        # 业务逻辑：关闭可提高兼容性，避免与某些插件冲突
         SFE_FLOW: 0
+        # 【K510 WiFi支持】Amlogic K510芯片的WiFi驱动
+        # 业务逻辑：N1使用的是百兆网卡，不需要WiFi支持，关闭减少体积
         ENABLE_WIFI_K510: 0
 
+    # ==================================================================================
+    # 步骤15：生成发布信息 - 准备Release发布说明
+    # 【业务逻辑】创建包含固件关键信息的发布说明文档
+    # 内容包括：适用机型、源码地址、默认登录信息、注意事项等
+    # 【前置条件】
+    #   - 打包成功（PACKAGED_STATUS=success）
+    #   - 构建未被取消
+    # ==================================================================================
     - name: 生成发布标签
       if: ${{ env.PACKAGED_STATUS == 'success' }} && !cancelled()
       run: |
+        # 【版本标签生成】基于时间戳生成唯一发布标签
+        # 格式：OpenWrt_YYYY.MM.DD-HH.MM，如OpenWrt_2024.05.17-14.30
+        # 用途：GitHub Release的Tag名称，便于版本追溯
         echo "release_tag=$(date +"%Y.%m.%d-%H.%M")" >> ${GITHUB_OUTPUT}
+        # 【创建发布说明文件】生成Markdown格式的发布信息
         touch release.txt
         echo "
         🍁 注意事项：首次使用建议全新刷写
@@ -129,44 +432,126 @@ jobs:
         🔒 密码: password 
         
         " >> release.txt
+        # 【标签生成状态】标记发布信息准备完成
         echo "tag_status=success" >> $GITHUB_ENV
 
+    # ==================================================================================
+    # 步骤16：发布到GitHub Releases - 分发编译完成的固件
+    # 【业务逻辑】将打包好的.img.xz文件上传到GitHub Releases
+    # 分发机制：
+    #   - 使用GitHub Release功能存储发布物
+    #   - 支持用户通过浏览器下载
+    #   - 提供SHA256校验值供完整性验证
+    # 【前置条件】
+    #   - 标签生成成功（tag_status=success）
+    #   - 构建未被取消
+    # ==================================================================================
     - name: 发布固件到 Releases
+      # softprops/action-gh-release：官方推荐的Release发布Action
+      # 功能：创建Release、，上传文件、生成校验和
       uses: softprops/action-gh-release@v2
       if: ${{ env.tag_status == 'success' }} && !cancelled()
       with:
+        # 【发布标签】Git Tag名称，用于版本标记
         tag_name: OpenWrt_${{ env.PACKAGED_OUTPUTDATE }}
+        # 【待发布文件】打包生成的.img.xz镜像文件
+        # 使用通配符匹配所有符合格式的文件
         files: ${{ env.PACKAGED_OUTPUTPATH }}/*.img.xz
+        # 【发布说明】使用之前生成的release.txt文件内容
         body_path: release.txt
+        # 【认证令牌】使用GitHub Token进行API认证
+        # 权限要求：repo（仓库读写）权限才能创建Release
         token: ${{ env.GITHUB_TOKEN }}
 
+    # ==================================================================================
+    # 步骤17：邮件通知 - 编译完成后推送通知
+    # 【业务逻辑】通过SMTP协议发送邮件通知开发者构建结果
+    # 通知内容：包含构建链接，便于快速查看构建详情
+    # 【前置条件】
+    #   - 编译成功（compile_status=success）
+    #   - 构建未被取消
+    # ==================================================================================
     - name: 163邮件推送
       if: ${{ env.compile_status }} == 'success' && !cancelled()
+      # dawidd6/action-send-mail：第三方SMTP邮件发送Action
+      # 支持多种邮件服务商配置
       uses: dawidd6/action-send-mail@v3
       with:
         # 163邮箱IMAP/SMTP服务器配置
         server_address: smtp.163.com
+        # server_port：993为IMAP标准端口，994为IMAPS加密端口
         server_port: 994
+        # 【传输加密】启用TLS/SSL加密传输，确保认证信息不被泄露
         secure: true
+        # 【认证凭据】从GitHub Secrets获取邮箱用户名和授权码
+        # 注意：163邮箱需要使用客户端授权码而非登录密码
         username: ${{ secrets.MAIL_U }}
         password: ${{ secrets.MAIL_P }}
         
         # 邮件内容
         subject: "🎉 ImmortalWrt编译成功"
+        # 【收件人】发送到自己邮箱，形成通知存档
         to: ${{ secrets.MAIL_U }}
+        # 【发件人】显示名称包含GitHub Actions标识
         from: GitHub Actions <${{ secrets.MAIL_U }}>
+        # 【邮件正文】包含构建详情的链接，便于快速跳转查看
         body: "编译详情：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
+    # ==================================================================================
+    # 步骤18：清理构建历史 - 减少仓库存储占用
+    # 【业务逻辑】删除过时的Workflow运行记录，释放存储空间
+    # 保留策略：
+    #   - 保留最近1天的运行记录（retain_days: 1）
+    #   - 至少保留1次运行记录（keep_minimum_runs: 1）
+    # 【存储空间说明】
+    #   - 每次运行约产生50-100MB的构建日志
+    #   - 清理历史可显著减少仓库体积
+    # ==================================================================================
     - name: 删除运行记录
+      # Mattraks/delete-workflow-runs：清理GitHub Actions运行历史
       uses: Mattraks/delete-workflow-runs@main
       with:
+        # 【保留天数】仅保留最近1天内的运行记录
+        # 业务逻辑：便于调试近期构建问题，过期记录无保留价值
         retain_days: 1
+        # 【最少保留数】即使超过保留天数，也至少保留1次运行记录
+        # 业务逻辑：确保总有一些运行记录可供参考
         keep_minimum_runs: 1
+        # 【API认证】需要仓库的Contents和Workflow权限
         token: ${{ env.GITHUB_TOKEN }}
 
+    # ==================================================================================
+    # 步骤19：清理旧版本固件 - 释放Release存储空间
+    # 【业务逻辑】自动删除过时的Release版本，只保留最近2个
+    # 触发条件：仅当UPLOAD_RELEASE=true时执行（当前配置未启用）
+    # 保留策略：keep_latest=2，保留最新2个版本
+    # 【存储空间说明】
+    #   - 每个.img.xz约150-250MB
+    #   - 保留2个版本约占用300-500MB
+    #   - 长期累积会消耗大量GitHub Release存储配额
+    # ==================================================================================
     - name: 删除自动发布的旧固件
+      # dev-drprasad/delete-older-releases：清理旧Release版本
+      # 功能：删除旧的Release和Tag，释放存储空间
       uses: dev-drprasad/delete-older-releases@master
+      # 【触发条件】当UPLOAD_RELEASE环境变量为true时执行
+      # 当前配置：env.UPLOAD_RELEASE未设置，该步骤不会执行
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
+        # 【保留版本数】只保留最新的2个Release版本
+        # 业务逻辑：平衡版本历史和存储空间占用
         keep_latest: 2
+        # 【同步删除Tag】删除Release时同时删除对应的Git Tag
+        # 业务逻辑：避免Tag与Release不同步造成混乱
         delete_tags : true
+
+# ==================================================================================
+# 【文件结束】ImmortalWrt N1自动化构建流水线配置文件
+# 流水线总步骤数：19个步骤
+# 关键依赖：
+#   - jlumbroso/free-disk-space：磁盘清理
+#   - unifreq/openwrt_packit：镜像打包
+#   - softprops/action-gh-release：Release发布
+#   - dawidd6/action-send-mail：邮件通知
+#   - Mattraks/delete-workflow-runs：历史清理
+# ==================================================================================

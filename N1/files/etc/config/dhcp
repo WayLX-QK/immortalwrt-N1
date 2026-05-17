@@ -1,34 +1,118 @@
 
+# ==================================================================================
+# DHCP和DNS服务配置文件 (Dnsmasq Configuration)
+# 目标设备：斐讯N1
+# 服务说明：Dnsmasq同时提供DNS缓存和DHCP服务
+# ==================================================================================
+
+# ==================================================================================
+# 【Dnsmasq主配置】DNS转发和缓存配置
+# ==================================================================================
 config dnsmasq
+	# 【域名必需】domainneeded - 强制DNS查询带域名后缀
+	# 业务逻辑：启用后，dnsmasq会将不带域名后缀的查询视为无效
+	# 防止DNS查询泄漏到上游DNS服务器
 	option domainneeded '1'
+	
+	# 【本地化查询】localise_queries - 根据客户端IP返回不同结果
+	# 业务逻辑：同一域名对不同网段返回不同IP（如CDN就近访问）
+	# 配合dnsmasq-full和ipset使用效果最佳
 	option localise_queries '1'
+	
+	# 【DNS重绑定保护】rebind_protection - 防御DNS重绑定攻击
+	# 业务逻辑：攻击者通过DNS响应将恶意域名解析为内网IP
+	# 当前设置：0表示关闭，因为N1作为旁路由可能需要重绑定
 	option rebind_protection '0'
+	
+	# 【本地域名后缀】local - 本地DNS后缀
+	# 解析：凡是以.lan结尾的域名都视为本地解析
 	option local '/lan/'
+	
+	# 【默认域名】domain - 分配给DHCP客户端的域名后缀
+	# 效果：DHCP客户端会自动获得lan后缀的域名
 	option domain 'lan'
+	
+	# 【展开主机名】expandhosts - 自动将主机名解析为完整域名
+	# 效果：ping "主机名" 会自动补全为 "主机名.lan"
 	option expandhosts '1'
+	
+	# 【缓存大小】cachesize - DNS缓存条数
+	# 设置为0：禁用DNS缓存，确保每次查询都走规则
+	# 业务逻辑：配合MosDNS时，dnsmasq仅作为转发，不缓存
 	option cachesize '0'
+	
+	# 【读取静态租约】readethers - 读取/etc/ethers文件
+	# 用于配置静态DHCP租约（IP与MAC绑定）
 	option readethers '1'
+	
+	# 【租约文件】leasefile - DHCP租约记录文件
+	# 路径：/tmp/dhcp.leases（tmpfs，重启后丢失）
 	option leasefile '/tmp/dhcp.leases'
+	
+	# 【本地服务限制】localservice - 仅响应本地网络的DNS查询
+	# 安全加固：防止DNS放大攻击
 	option localservice '1'
+	
+	# 【最小缓存TTL】min_cache_ttl - DNS记录最小缓存时间
+	# 设置：3600秒（1小时），减少上游DNS查询频率
 	option min_cache_ttl '3600'
+	
+	# 【EDNS包大小】ednspacket_max - EDNS0支持的最大UDP包大小
+	# 设置：1232字节，配合DNSSEC和大包查询
 	option ednspacket_max '1232'
+	
+	# 【不使用上游DNS】noresolv - 不使用/etc/resolv.conf中的上游DNS
+	# 业务逻辑：配合MosDNS时，dnsmasq只转发到本地MosDNS端口
+	# 避免双重解析导致规则失效
 	option noresolv '1'
 
+# ==================================================================================
+# 【LAN网段DHCP配置】DHCP服务配置（当前禁用）
+# ==================================================================================
 config dhcp 'lan'
+	# 【接口绑定】指定LAN接口提供DHCP服务
 	option interface 'lan'
+	# 【地址池起始】DHCP分配起始IP（192.168.2.100）
 	option start '100'
+	# 【地址池大小】最大分配150个IP（100-249）
 	option limit '150'
+	# 【租约时间】12小时，适合家庭网络使用
 	option leasetime '12h'
+	# 【DHCPv4模式】server表示作为DHCP服务器
 	option dhcpv4 'server'
+	# 【DHCP服务开关】ignore='1'表示禁用LAN的DHCP服务
+	# 业务逻辑：N1作为旁路由，不作为主DHCP服务器
+	# 主路由已提供DHCP，避免IP冲突
 	option ignore '1'
 
+# ==================================================================================
+# 【WAN网段DHCP配置】WAN接口（禁用）
+# ==================================================================================
 config dhcp 'wan'
 	option interface 'wan'
+	# 【禁用WAN的DHCP客户端】避免N1尝试从上级路由获取IP
 	option ignore '1'
 
+# ==================================================================================
+# 【IPv6 DHCP配置】odhcpd - IPv6路由公告和DHCPv6服务
+# ==================================================================================
 config odhcpd 'odhcpd'
+	# 【主DHCP模式】maindhcp=0表示仅作为RA（路由公告）
+	# 不提供DHCPv6地址分配（IPv6由主路由处理）
 	option maindhcp '0'
+	# 【IPv6租约文件】记录IPv6地址分配状态
 	option leasefile '/tmp/hosts/odhcpd'
+	# 【租约触发脚本】地址变化时执行的脚本
 	option leasetrigger '/usr/sbin/odhcpd-update'
+	# 【日志级别】4=INFO级别，记录基本运行信息
 	option loglevel '4'
+
+# ==================================================================================
+# 【配置结束】
+# 本配置文件关键点：
+#   - DNS不缓存(noresolv=1, cachesize=0)，配合MosDNS工作
+#   - DHCP服务在LAN上禁用(ignore=1)，避免与主路由冲突
+#   - 启用IPv6路由公告(odhcpd)，但禁用DHCPv6
+#   - DNS重绑定保护关闭，允许特殊网络拓扑
+# ==================================================================================
 
