@@ -44,7 +44,7 @@ env:
   # 版本策略说明：21.02分支基于OpenWrt 21.02内核5.4，驱动最稳定
   # 适用场景：追求绝对稳定性、WiFi兼容性最好、legacy设备支持最佳
   # 备选分支：openwrt-23.05(内核5.15)或openwrt-22.03(内核5.10)
-  REPO_BRANCH: openwrt-21.02
+  REPO_BRANCH: openwrt-23.05
   # 【Kconfig配置文件】预定义的编译配置文件，包含目标平台和软件包选择
   # 业务逻辑：N1/.config定义armsr平台、s905d芯片支持、以及基础软件包集
   CONFIG_FILE: N1/.config
@@ -384,7 +384,7 @@ jobs:
         # 【内核版本名称】用于标识和查找对应的内核文件
         # 业务逻辑：选择与OpenWrt分支匹配的内核版本
         # 当前配置：5.4.y（对应21.02分支，内核5.4最稳定）
-        KERNEL_VERSION_NAME: 5.4.y
+        KERNEL_VERSION_NAME: 5.15.y_6.6.y
         # 【芯片平台】指定目标硬件平台，s905d对应斐讯N1
         PACKAGE_SOC: s905d
         # 【镜像压缩格式】输出为.xz压缩格式，节省传输带宽
